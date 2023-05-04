@@ -2,6 +2,7 @@ import math
 import torch
 import gpytorch
 import matplotlib.pyplot as plt
+from gpytorch.constraints import Positive
 
 # prepare input data
 train_x = torch.linspace(0, 1, 100)
@@ -9,12 +10,68 @@ train_y = torch.sin(train_x * 2 * math.pi) + torch.randn(train_x.size()) + math.
 
 # prepare the model
 
+class MySimpleKernel(gpytorch.kernels.Kernel):
+    has_lengthscale = True
+
+    # this is the kernel function
+    def forward(self, x1, x2, **params):
+        # apply lengthscale
+        x1_ = x1.div(self.lengthscale)
+        x2_ = x2.div(self.lengthscale)
+        # calculate the distance between inputs
+        diff = self.covar_dist(x1_, x2_, **params)
+        # prevent divide by 0 errors
+        diff.where(diff == 0, torch.as_tensor(1e-20))
+        # return sinc(diff) = sin(diff) / diff
+        return torch.sin(diff).div(diff)
+
 
 class MyKernel(gpytorch.kernels.Kernel):
     is_stationary = True
 
+    def __init__(self, length_prior=None, length_constraint=None, **kwargs):
+        super().__init__(**kwargs)
+
+        # register the raw parameter
+        self.register_parameter(
+            name='raw_length', parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1, 1))
+        )
+
+        # set the parameter constraint to be positive, when nothing is specified
+        if length_constraint is None:
+            length_constraint = Positive()
+
+        # register the constraint
+        self.register_constraint("raw_length", length_constraint)
+
+        # set the parameter prior, see
+        # https://docs.gpytorch.ai/en/latest/module.html#gpytorch.Module.register_prior
+        if length_prior is not None:
+            self.register_prior(
+                "length_prior",
+                length_prior,
+                lambda m: m.length,
+                lambda m, v: m._set_length(v),
+            )
+    @property
+    def length(self):
+        # when accessing the parameter, apply the constraint transform
+        return self.raw_length_constraint.transform(self.raw_length)
+
+    @length.setter
+    def length(self, value):
+        return self._set_length(value)
+
+    def _set_length(self, value):
+        if not torch.is_tensor(value):
+            value = torch.as_tensor(value).to(self.raw_length)
+        # when setting the paramater, transform the actual value to a raw one by applying the inverse transform
+        self.initialize(raw_length=self.raw_length_constraint.inverse_transform(value))
+
     def forward(self, x1, x2, **params):
-        diff = self.covar_dist(x1, x2, **params)
+        x1_ = x1.div(self.length)
+        x2_ = x2.div(self.length)
+        diff = self.covar_dist(x1_, x2_, **params)
         diff.where(diff == 0, torch.as_tensor(1e-20))
         return torch.sin(diff).div(diff)
 # GP model
@@ -22,10 +79,11 @@ class MyKernel(gpytorch.kernels.Kernel):
 
 class MyGPModel(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, likelihood):
-        super(MyGPModel, self).__init__(train_x, train_y, likelihood)
+        super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
         # self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
-        self.covar_module = MyKernel()
+        # self.covar_module = MyKernel()
+        self.covar_module = MySimpleKernel()
 
     def forward(self, x):
         mean_x = self.mean_module(x)
@@ -49,11 +107,11 @@ def train(model, likelihood, training_iter):
         loss = -mll(output, train_y)
         loss.backward()
 
-        print("Iter:{}/{}, loss:{}, length_scale:{}, noise:{}".format(
-            i, training_iter, loss.item(),
-            model.covar_module.base_kernel.lengthscale.item(),
-            model.likelihood.noise_covar.noise.item()
-        ))
+        # print("Iter:{}/{}, loss:{}, length_scale:{}, noise:{}".format(
+        #     i, training_iter, loss.item(),
+        #     model.covar_module.base_kernel.lengthscale.item(),
+        #     model.likelihood.noise_covar.noise.item()
+        # ))
 
         optimizer.step()
 
@@ -63,8 +121,6 @@ def train(model, likelihood, training_iter):
 
 
 def evaluation(model, likelihood, test_x):
-    model.eval()
-    likelihood.eval()
     with torch.no_grad(), gpytorch.settings.fast_pred_var():
         observed_pred = likelihood(model(test_x))
 
@@ -96,5 +152,8 @@ if __name__ == "__main__":
     test_x = torch.linspace(0, 1.5, 202)
 
     train(model, likelihood, training_iter)
+
+    model.eval()
+    likelihood.eval()
     observed_pred = evaluation(model, likelihood, test_x)
     plot(observed_pred, test_x)
