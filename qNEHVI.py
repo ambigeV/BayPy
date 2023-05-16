@@ -5,58 +5,61 @@ from ax.modelbridge.factory import get_MOO_EHVI, get_MOO_PAREGO
 from ax.modelbridge.modelbridge_utils import observed_hypervolume
 import numpy as np
 import matplotlib.pyplot as plt
+from ax import Data
 
 # Start Sobol
-sobol_experiment = build_experiment("sobol_pareto", search_space=search_space,
-                                    optimization_config=optimization_config)
+ehvi_experiment = build_experiment("ehvi_pareto", search_space=search_space,
+                                   optimization_config=optimization_config)
 # print(sobol_experiment.__class__)
-sobol_data = initialize_experiment(sobol_experiment)
+ehvi_data = initialize_experiment(ehvi_experiment)
+print("ehvi data is {}".format(ehvi_data))
 
 # Define the model of Sobol
-sobol_model = Models.SOBOL(
-    experiment=sobol_experiment,
-    data=sobol_data
-)
-
-sobol_hv_list = []
+ehvi_model = None
+ehvi_hv_list = []
 
 
 # Define each iteration
-def sobol_iteration():
-    generator_run = sobol_model.gen(1)
-    trial = sobol_experiment.new_trial(generator_run=generator_run)
-    trial.run()
-
-    exp_df = exp_to_df(sobol_experiment)
-    outcomes = np.array(exp_df[['a', 'b']], dtype=np.double)
-
-    dummy_model = get_MOO_EHVI(
-        experiment=sobol_experiment,
-        data=sobol_experiment.fetch_data(),
+def ehvi_iteration(ehvi_data=ehvi_data):
+    ehvi_model = get_MOO_EHVI(
+        experiment=ehvi_experiment,
+        data=ehvi_data,
     )
 
+    generator_run = ehvi_model.gen(1)
+    trial = ehvi_experiment.new_trial(generator_run=generator_run)
+    trial.run()
+    new_ehvi_data = Data.from_multiple_data([ehvi_data, trial.fetch_data()])
+
+    exp_df = exp_to_df(ehvi_experiment)
+    outcomes = np.array(exp_df[['a', 'b']], dtype=np.double)
+
     try:
-        hv = observed_hypervolume(modelbridge=dummy_model)
+        hv = observed_hypervolume(modelbridge=ehvi_model)
     except:
         hv = 0
         print("Failed to compute hv")
 
-    return hv
+    return hv, new_ehvi_data
 
 
 # iteration by iteration
 def iteration(max_iter=N_BATCH):
+    new_ehvi_data = None
     for i in range(max_iter):
-        hv = sobol_iteration()
+        if i == 0:
+            hv, new_ehvi_data = ehvi_iteration(ehvi_data)
+        else:
+            hv, new_ehvi_data = ehvi_iteration(new_ehvi_data)
         print("Iteration: {}, HV: {}".format(i, hv))
-        sobol_hv_list.append(hv)
+        ehvi_hv_list.append(hv)
 
 
 if __name__ == "__main__":
     iteration()
-    sobol_outcomes = np.array(exp_to_df(sobol_experiment)[['a', 'b']],
+    ehvi_outcomes = np.array(exp_to_df(ehvi_experiment)[['a', 'b']],
                               dtype=np.double)
-    print(sobol_outcomes.shape)
+    print(ehvi_outcomes.shape)
 
-    plt.plot(sobol_hv_list)
+    plt.plot(ehvi_hv_list)
     plt.show()
